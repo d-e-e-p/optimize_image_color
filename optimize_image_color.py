@@ -13,21 +13,34 @@ from optimize_color import opt
 # problem to run for optimization
 #
 operations = {}
-# leave out rgb_equation_multi_ccm for now
-operations['wb_ccm'] = "dng_wb dng_ccm".split()
+
+# white balance and color correction matrix
+operations['dng_opt'] = "dng_wb dng_ccm dng_ccm_blacklevel".split()
+
+# use rt to solve color issues
 operations['rt_opt'] = """
-    rgb_equation_spline
-    rgb_curves
-    channel_mixer
-    color_toning
-    luminance_curve
-    hsv_equalizer
+    rt_rgb_curves
+    rt_channel_mixer
+    rt_color_toning
+    rt_luminance_curve
+    rt_hsv_equalizer
 """.split();
+
+# operate equation on rgb input values
+operations['eq_opt'] = """
+    eq_spline
+    eq_root_polynomial
+    eq_multi_ccm2
+    eq_multi_ccm4
+    eq_gamma_scale
+""".split();
+
 # expanded options (also form valid groupings for arguments)
 # ie calling wb_ccm will invoke both dng_wb and dng_ccm
-operations['all'] = operations['wb_ccm'] + operations['rt_opt']
-operations['default'] = "dng_ccm rgb_curves".split()
+operations['all'] = operations['dng_opt'] + operations['rt_opt'] + operations['eq_opt']
+operations['default'] = "dng_ccm_blacklevel rt_rgb_curves".split()
 
+# expand keys of dict as options, eg -operation default
 operations_choices = operations['all'] + list(operations.keys())
 
 #

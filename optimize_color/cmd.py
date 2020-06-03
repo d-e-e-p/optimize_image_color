@@ -3,10 +3,11 @@
 #
 
 import os, sys, re, math
-from pathlib import Path
+import os.path
+from os import path
 import numpy as np
 import subprocess
-import pdb
+import pudb
 import shutil
 
 import rich
@@ -18,7 +19,7 @@ class Exp:
     def __init__(self, args, operation):
         self.args = args
         self.operation = operation
-        terminal = shutil.get_terminal_size((132, 40))
+        terminal = shutil.get_terminal_size((1024, 40))
         self.console = Console(width=terminal.columns, force_terminal=True)
 
         # ok do the main init setup in 4 easy steps: 
@@ -27,7 +28,7 @@ class Exp:
         SetupCallback(self)     # define cost function
         SetupGenProfiles(self)  # profiles for running some functions
         if self.args.verbose:
-            print(f"Init Exp with operation: {operation} ")
+            print(f"Init Exp with tag: {self.tag} ")
 
     def process_args(self):
         # globals
@@ -37,21 +38,30 @@ class Exp:
         self.profile = None
         self.blacklevelp = None
         self.whitelevelp = None
-        if self.args.tag is None:
-            self.args.tag = self.operation
+
         if self.args.src is None:
-            self.src = "images/img00006_G000E0400_wb_ccm.dng"
+            self.src = "images/input/img00006_G000E0400_wb_ccm.dng"
         else:
             self.src = self.args.src
+        self.csv = get_csv_from_src(self.src)
+
+
         if self.args.dst is None:
             self.dst = None
         else:
             self.dst = self.args.dst
+
+        # mark this run
+        if self.args.tag is None:
+            basename = os.path.basename(self.src).rsplit('.',1)[0]
+            self.tag = f"{basename}_{self.operation}"
+        else:
+            self.tag = self.args.tag
+
         self.constraints = ()   # can't be None
 
-        self.color_multiplier = 1.0
-        self.grey_multiplier  = 0.0
-        print(f"default multipliers for (color,grey) = ({self.color_multiplier},{self.grey_multiplier})")
+        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0} 
+        print(f"default multipliers : {self.cost_multiplier}")
         
     def whoami(self, from_mod ):
         print("hello {0}. I am instance {1}".format(from_mod, self))
@@ -63,6 +73,9 @@ class SetupVars:
         self.exp = exp
         # call the setup function based on operation variable, eg dng_wb..must exist
         func = getattr(self, self.exp.operation)
+        if not func:
+            print(f"ERROR: SetupVars not found for operation {self.exp.operation}")
+            breakpoint();
         func()
 
     def dng_wb(self):
@@ -73,87 +86,158 @@ class SetupVars:
         ])
         self.exp.bounds = [(0.4,2)] * self.exp.x0.size
         # only really care about grey?
-        self.exp.grey_multiplier  = 1.0
-        self.exp.color_multiplier = 0.5
+        self.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
+        print(f"reset multipliers to : {self.cost_multiplier}")
 
     def dng_ccm(self):
         # best dng ccm after grey=20 deltaE 11.6
-        x0 = np.array( [
-                0.90273141, -0.23916363, -0.14392367, 
-               -0.08329043,  1.1717975 , -0.11734164,  
-                0.19868041,  0.25373908,  0.65681686, 0.2, 2 
-        ])
-        # grey=8 deltaE=14
-        self.exp.x0 = np.array( [
-             2.521,-0.456,-0.199,
-            -0.416, 1.210, 0.174,
-            -0.212, 0.053, 3.328, 2.141, 0.008 
-        ])
-        # for example2
+        # starting point
         self.exp.x0 = np.array([
             1.,  0,  0,
             0.,  1,  0,
-            0.,  0,  1,  1, 1
+            0.,  0,  1,
         ])
+
+        # grey=8 deltaE=14
+        if "img00006_" in self.exp.src:
+            self.exp.x0 = np.array( [
+                 2.521,-0.456,-0.199,
+                -0.416, 1.210, 0.174,
+                -0.212, 0.053, 3.328, 
+            ])
+
+        if "MG_0199" in self.exp.src:
+            self.exp.x0 = np.array([
+                0.970, 0.003, 0.003, 
+                0.003, 0.999,-0.001, 
+                0.006, 0.006, 1.006, 
+            ])
+
+
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+
+    def dng_ccm_blacklevel(self):
+        # best dng ccm after grey=20 deltaE 11.6
+        # starting point
         self.exp.x0 = np.array([
-            0.970, 0.003, 0.003, 
-            0.003, 0.999,-0.001, 
-            0.006, 0.006, 1.006, 0.975, 1.150
+            1.,  0,  0,
+            0.,  1,  0,
+            0.,  0,  1,  0, 0
         ])
 
-        self.exp.bounds = [(-2,2)] * x0.size
+        if "CanonG10ColorTestChart" in self.exp.src:
+            x0 = np.array( [
+                1.141, 0.141, 0.141, 0.141, 1.141, 0.141, 0.141, 0.141, 1.141,-0.248, 1.766
+            ])
+        if "Df_WB_Demo006" in self.exp.src:
+            x0 = np.array( [
+                1.000,-0.001,-0.001, 0.000, 1.000, 0.030, 0.030,-0.032, 0.968,-0.492, 1.158
+            ])
+        if "MG_0709" in self.exp.src:
+            x0 = np.array( [
+                1.000, 0.000, 0.000, 0.000, 1.000, 0.000, 0.000, 0.000, 1.000,-0.923, 1.384 
+            ])
+        if "img00006_" in self.exp.src:
+            # grey=8 deltaE=14
+            self.exp.x0 = np.array( [
+                2.583,-0.414,-0.211,
+               -0.428, 1.306, 0.178,
+               -0.217, 0.055, 3.650, 1.021, 0.010 
+            ])
+        # for example2
+        if "MG_0199" in self.exp.src:
+            self.exp.x0 = np.array([
+                0.970, 0.003, 0.003, 
+                0.003, 0.999,-0.001, 
+                0.006, 0.006, 1.006, 0.975, 1.150
+            ])
 
-    def rgb_equation_spline(self):
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
 
-        # force inputs to be in increasing order
-        #self.exp.process_inputs = getattr(self, 'force_monotonic')
+    def eq_spline(self):
+
+        # force inputs to be in increasing order in calling function
         self.exp.constraints={"fun": constraint_monotonic, "type": "ineq"}
 
-        x0 = np.array([
-          0.161 , 0.409 , 0.678,
-          0.256 , 0.513 , 0.800,
-          0.259 , 0.502 , 0.728,
-        ])
-        x0 = np.array([
-            0.151,  0.416,  0.737,
-            0.250,  0.508,  0.768,
-            0.256,  0.509,  0.740,
-        ])
         self.exp.x0 = np.array([
-         0.174 , 0.442  ,0.754 ,
-         0.250 , 0.504  ,0.754 ,
-         0.214 , 0.492  ,0.742 ,
+            0.25,  0.5,  0.75,
+            0.25,  0.5,  0.75,
+            0.25,  0.5,  0.75,
+        ])
 
-        ])
-        self.exp.x0 = np.array([
-            0.25,  0.5,  0.75,
-            0.25,  0.5,  0.75,
-            0.25,  0.5,  0.75,
-        ])
+        if "CanonG10ColorTestChart" in self.exp.src:
+            self.exp.x0 = np.array([
+                0.117, 0.481, 0.726, 0.332, 0.526, 0.747, 0.242, 0.523, 0.743 
+            ])
+
+        if "Df_WB_Demo006" in self.exp.src:
+            self.exp.x0 = np.array([
+                0.309, 0.612, 1.000, 0.263, 0.695, 1.000, 0.369, 0.567, 1.000 
+            ])
+
+        if "img00006_" in self.exp.src:
+            self.exp.x0 = np.array([
+                0.250, 0.505, 0.741, 
+                0.247, 0.508, 0.750, 
+                0.247, 0.503, 0.767,
+            ])
 
 
         self.exp.bounds = [(0.1,0.9)] * self.exp.x0.size
 
-    def rgb_equation_multi_ccm(self):
-        self.exp.x0 = np.zeros( 16*3 )
-        # cf = 7.5
+    def eq_root_polynomial(self):
         self.exp.x0 = np.array([
-            7.07555110e-01, -4.18892216e-02,  5.21632256e-03, -5.46989948e-02,
-            6.48380281e-01, -3.09466715e-02,  2.72643810e-02,  2.39125565e-02,
-            6.95059686e-01, -3.11272118e-02,  9.72862211e-03, -3.74302259e-04,
-            5.34734800e-01,  1.96765078e-01, -7.59708923e-02,  1.04621338e+00,
-           -1.01966086e-01,  6.76919073e-01, -6.09138203e-02,  1.75397022e-02,
-            2.16130374e-03,  6.61435494e-01,  5.15071269e-02,  1.16597968e-01,
-            3.71452083e-02,  7.53564323e-01, -1.68554772e-03, -8.47147337e-03,
-           -1.58792743e-01,  9.01003077e-01, -1.04256134e-01,  2.15004421e-02,
-           -2.31891748e-02, -4.02681954e-02,  6.37127568e-01, -2.48251111e-02,
-            4.46600298e-02,  4.19545904e-02,  7.10103578e-01, -1.96358505e-02,
-            7.68817953e-02, -2.11231350e-02,  7.01171477e-01,  1.10196150e-01,
-           -1.16677175e-01, -2.07322137e-01,  1.06732939e+00,  1.37196100e-02])
+            1.,  0,  0,  0.,  0,  0,  0.,  0,  0,  0.,  0,  0,  0,
+            0.,  1,  0,  0.,  0,  0,  0.,  0,  0,  0.,  0,  0,  0,
+            0.,  0,  1,  0.,  0,  0,  0.,  0,  0,  0.,  0,  0,  0,
+        ])
+        if "img00006_" in self.exp.src:
+            self.exp.x0 = np.array([
+ 1.000,-0.004,-0.004,-0.010,-0.010,-0.012,-0.005, 0.003, 0.002,-0.003, 0.006, 0.003, 0.003,
+-0.009, 1.006,-0.010,-0.002,-0.002,-0.008,-0.010,-0.001,-0.007,-0.007,-0.004, 0.002, 0.005,
+-0.011,-0.008, 0.996, 0.001, 0.000,-0.005,-0.010,-0.002, 0.095,-0.076,-0.006,-0.003,-0.006,
+            ])
+
+        # cf = 7.5
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
 
+    def eq_multi_ccm2(self):
+        self.exp.x0 = np.array([
+            1, 0, 0,  1, 0, 0, 
+            0, 1, 0,  0, 1, 0, 
+            0, 0, 1,  0, 0, 1, 
+        ])
+        if "img00006_" in self.exp.src:
+            self.exp.x0 = np.array([
+             0.975, 0.001,-0.032, 1.009,-0.000, 0.003,
+             0.003, 0.942,-0.038, 0.006, 1.009, 0.008,
+            -0.029,-0.029, 1.002, 0.006, 0.003, 1.005,
+        ])
 
-    def rgb_curves(self):
+        #if "img00006_" in self.exp.src:
+
+        # cf = 7.5
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+
+    def eq_multi_ccm4(self):
+        self.exp.x0 = np.array([
+            1,0,0, 1,0,0, 1,0,0, 1,0,0,
+            0,1,0, 0,1,0, 0,1,0, 0,1,0,
+            0,0,1, 0,0,1, 0,0,1, 0,0,1,
+        ])
+        # cf = 7.5
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+
+    def eq_gamma_scale(self):
+        self.exp.x0 = np.array([
+            1.,  0,  0,  0.,  0,  0,  0,
+            0.,  1,  0,  0.,  0,  0,  0,
+            0.,  0,  1,  0.,  0,  0,  0,
+        ])
+        # cf = 7.5
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+
+    def rt_rgb_curves(self):
         # cf=11 but weird
         self.exp.constraints={"fun": constraint_monotonic, "type": "ineq"}
         self.exp.x0 = np.array([
@@ -168,18 +252,18 @@ class SetupVars:
         ])
         self.exp.bounds = [(0.1,0.9)] * self.exp.x0.size
 
-    def channel_mixer(self):
+    def rt_channel_mixer(self):
         # best Channel Mixer grey 8 deltaE 10
         self.exp.x0 = np.array( [
-	-0.258,  0.114, -0.149,
-	 0.024, -0.207, -0.170,
-	-0.183,  0.174, -0.342,
+        -0.258,  0.114, -0.149,
+         0.024, -0.207, -0.170,
+        -0.183,  0.174, -0.342,
         ])
         self.exp.x0 = np.zeros( 9 )
         self.exp.bounds = [(-1,1)] * self.exp.x0.size
 
 
-    def color_toning(self):
+    def rt_color_toning(self):
         # cf=18 or so..
         self.exp.x0 = np.array( [
             0.326,  0.755 , 1.000,
@@ -190,13 +274,13 @@ class SetupVars:
         self.exp.bounds = [(-5,5)] * self.exp.x0.size
 
 
-    def luminance_curve(self):
+    def rt_luminance_curve(self):
         self.exp.x0 = np.zeros( 12 )
         self.exp.x0 += 0.5
         self.exp.bounds = [(0.2,0.8)] * self.exp.x0.size
 
 
-    def hsv_equalizer(self):
+    def rt_hsv_equalizer(self):
         self.exp.x0 = np.zeros( 30 )
         self.exp.x0 += 0.5
         self.exp.bounds = [(0,1)] * self.exp.x0.size
@@ -215,22 +299,34 @@ class SetupCallback:
         self.exp = exp
         self.ops = Operation(exp)
         # just store function for later in Exp object
-
         self.exp.fun = getattr(self, self.exp.operation, None)
         if not self.exp.fun:
-            self.exp.fun = getattr(self, 'generic_rt_with_profile')
+            if self.exp.operation.find("rt_") == 0 :
+                self.exp.fun = getattr(self, 'rt_generic')
+            elif self.exp.operation.find("eq_") == 0 :
+                self.exp.fun = getattr(self, 'eq_generic')
+            else:
+                print(f"ERROR: handler not found for operation {self.exp.operation}")
+                breakpoint();
 
 
     def dng_wb(self,x):
         # only allow R and B to vary holding G at 1
         args = f"""\"{x[0]} 1.0 {x[1]}\" """
         
-        self.ops.run_cmd(f"/bin/rm -f images/corrected.dng ; exiftool -AsShotNeutral={args} -o images/corrected.dng  {self.exp.src}")
-        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/corrected.jpg -c images/corrected.dng")
+        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -AsShotNeutral={args} -o images/run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
         res = self.ops.check_results(x)
         return res
 
-    def dng_ccm(self,x):
+    def dng_ccm (self,x):
+        args = get_args_string(x)
+        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o images/run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
+        res = self.ops.check_results(x)
+        return res
+
+    def dng_ccm_blacklevel(self,x):
         # extra conf at end for blacklevel
         y = x[0:9:1] # first 9 elements only
         args = get_args_string(y)
@@ -243,37 +339,31 @@ class SetupCallback:
         sixteenbit = 2**16 - 1
         #blacklevel = int(x[9]  * (4000.0/2.0)) # blacklevel limit should be around 4000
         #whitelevel = sixteenbit - int(x[10] * (40000.0/2.0)) # whitelevel 
-        blacklevel = int(x[9]  * 1024) # blacklevel = 1024
+
+        # for exp2 blacklevel = 1024 whitelevel = 15600
+        blacklevel = int(x[9]  * 4096) # blacklevel = 1024
         whitelevel = sixteenbit - int(x[10] * 49935) # whitelevel = 15600
 
         self.exp.blacklevelp =  blacklevel * 100.0/sixteenbit
         self.exp.whitelevelp =  whitelevel * 100.0/sixteenbit
 
-        #self.ops.run_cmd("/bin/rm -f images/corrected.dng ; exiftool -ColorMatrix1=" + args + " -ColorMatrix2=" + args + " -o images/corrected.dng  images/img00006_G000E0400_wb.dng")
-        self.ops.run_cmd(f"/bin/rm -f images/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={blacklevel} -IFD0:WhiteLevel={whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={blacklevel} -SubIFD:WhiteLevel={whitelevel}  -o images/corrected.dng  {self.exp.src}")
-        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/corrected.jpg -c images/corrected.dng")
+        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={blacklevel} -IFD0:WhiteLevel={whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={blacklevel} -SubIFD:WhiteLevel={whitelevel}  -o images/run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
         res = self.ops.check_results(x)
         return res
 
-    def rgb_equation_spline(self,x):
+    def eq_spline(self,x):
         x = force_monotonic(x)
-        return self.generic_rt_with_x_arguments(x)
+        return self.eq_generic(x)
 
-    def rgb_equation_multi_ccm(self,x):
-        return self.generic_rt_with_x_arguments(x)
-
-    def rgb_curves(self,x):
-        x = force_monotonic(x)
-        return self.generic_rt_with_profile(x)
-
-    def generic_rt_with_x_arguments(self,x):
-        args = get_args_string(x)
-        self.ops.run_cmd(f"./bin/rawtherapee-cli -Y -o images/corrected.jpg -m {args} -c {self.exp.src}")
+    def rt_generic(self,x):
+        self.exp.gen_profile(x)
+        self.ops.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p profile.pp3 -o images/run/corrected.jpg -c {self.exp.src}")
         return self.ops.check_results(x)
 
-    def generic_rt_with_profile(self,x):
-        self.exp.gen_profile(x)
-        self.ops.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p profile.pp3 -o images/corrected.jpg -c {self.exp.src}")
+    def eq_generic(self,x):
+        args = get_args_string(x)
+        self.ops.run_cmd(f"./bin/rawtherapee-cli -Y -o images/run/corrected.jpg -e {self.exp.operation} -m {args} -c {self.exp.src}")
         return self.ops.check_results(x)
 
 # end class SetupCallback
@@ -282,104 +372,127 @@ class SetupCallback:
 class Operation:
     def __init__(self, exp):
         self.exp = exp
+        self.text = {}
 
     def run_cmd(self, cmd):
         out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        if  len(out.stderr) > 0:
+            print(out.stderr, file=sys.stderr)
+            breakpoint();
+        #pu.db
         if self.exp.args.verbose:
             print(out)
         return out
 
     def check_results(self,x):
-        #out = self.run_cmd("./bin/macduff images/corrected.jpg images/check.jpg --restore")
-        out = self.run_cmd("./bin/macduff_example2 images/corrected.jpg images/check.jpg --restore")
-        res = self.look_thru_cmd_output(x,out)
+        out = self.run_cmd(f"./bin/macduff images/run/corrected.jpg images/run/check.jpg --restore {self.exp.csv}")
+        cur_res = self.look_thru_cmd_output(x,out)
         # store check image with attributes
         self.exp.counter += 1
-        check_image = f"images_res/check_{self.exp.args.tag}_{self.exp.counter}.jpg"
-        comment = f""" args:{self.exp.args},x:{x},grey_average_error:{self.exp.grey_average_error},deltaE_average_error{self.exp.deltaE_average_error},res:{res} """
-        cmd = f"""/bin/rm -f {check_image} ;  exiftool -o {check_image} -comment="{comment}" images/check.jpg"""
+        check_image = f"images/results/check_{self.exp.tag}_run{self.exp.counter}.jpg"
+        comment = f""" args:{self.exp.args},x:{x},res:{cur_res},error:{self.exp.cur_error} """
+        cmd = f"""/bin/rm -f {check_image} ;  exiftool -o {check_image} -comment="{comment}" images/run/check.jpg"""
         self.run_cmd(cmd)
-        return res
+        return cur_res
 
-    def look_thru_cmd_output(self, x,out):
-        # look for 'error = 85263.663537'
-        m = re.search('grey_average_error *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
-        if m:
-            grey_average_error = float(m.group(1))
-        else:
-            grey_average_error = 5000.0
+    def look_thru_cmd_output(self, cur_x, out):
+        # grey_average =  62.1
+        self.exp.cur_error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
+        m = re.findall('(\w+_average) *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
+        for thing,value in m:
+            self.exp.cur_error[thing] = float(value)
 
-        m = re.search('deltaE_average_error *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
-        if m:
-            deltaE_average_error = float(m.group(1))
-        else:
-            deltaE_average_error = 5000.0
-
-        # for white balance test ignore color metric .. focus on grey
-        res = self.exp.grey_multiplier  * grey_average_error +  \
-              self.exp.color_multiplier * deltaE_average_error
-
-        self.exp.grey_average_error = grey_average_error
-        self.exp.deltaE_average_error = deltaE_average_error
+        # eg for white balance test ignore color metric .. focus on grey
+        cur_res = 0
+        for thing,value in self.exp.cur_error.items():
+            cur_res += self.exp.cost_multiplier[thing] * value 
 
         if self.exp.min_res is None:
-            self.exp.min_res = res
-        self.exp.min_res = min(self.exp.min_res,res)
+            self.exp.min_res = cur_res
+        self.exp.min_res = min(self.exp.min_res,cur_res)
 
         # record this state if res is optimal
-        if math.isclose(res, self.exp.min_res, rel_tol=1e-3):
-            self.exp.min_x = x
-            self.exp.min_grey_average_error   = grey_average_error
-            self.exp.min_deltaE_average_error = deltaE_average_error
+        if math.isclose(cur_res, self.exp.min_res, rel_tol=1e-3):
+            self.exp.min_x = cur_x
+            self.exp.min_error = self.exp.cur_error
             if self.exp.blacklevelp is not None:
                 self.exp.min_blacklevelp = self.exp.blacklevelp
+            if self.exp.whitelevelp is not None:
                 self.exp.min_whitelevelp = self.exp.whitelevelp
 
-        self.exp.res = res
-        self.print_status(x)
-        return res
+        self.exp.res = cur_res
+        self.exp.cur_res = cur_res
+        self.print_status(cur_x)
+        return cur_res
 
     def print_status(self, cur_x):
 
         CURSOR_UP_ONE = '\x1b[1A'
         ERASE_LINE = '\x1b[2K'
 
+        text = self.text
+
         # first define all the text
-        text_title = f"op={self.exp.operation} method={self.exp.method}"
-        text_run = f"run{self.exp.counter}"
+        text['title'] = f"op={self.exp.operation} method={self.exp.method}"
+        text['run'] = f"run{self.exp.counter}"
 
-        text_cur_error =  f"(grey,color) {self.exp.grey_multiplier} X {self.exp.grey_average_error:4.1f} + {self.exp.color_multiplier} X {self.exp.deltaE_average_error:4.1f} = {self.exp.res:5.2f}"
-        text_min_error =  f"(grey,color) {self.exp.grey_multiplier} X {self.exp.min_grey_average_error:4.1f} + {self.exp.color_multiplier} X {self.exp.min_deltaE_average_error:4.1f} = {self.exp.min_res:5.2f}" 
+        text['cur_error'] =  "(E,C,G) = "
+        text['min_error'] =  "(E,C,G) = "
 
+        i = 0
+        for type in ['deltaE_average', 'deltaC_average', 'greyFC_average']:
+                text['cur_error'] +=  f"{self.exp.cost_multiplier[type]} X {self.exp.cur_error[type]:4.1f} " 
+                text['min_error'] +=  f"{self.exp.cost_multiplier[type]} X {self.exp.min_error[type]:4.1f} " 
+                if i == 2:
+                    text['cur_error'] +=  " = "
+                    text['min_error'] +=  " = "
+                else:
+                    text['cur_error'] +=  " + "
+                    text['min_error'] +=  " + "
+                i += 1;
+        
+        
+        text['cur_error'] +=  f"{self.exp.cur_res:5.2f}"
+        text['min_error'] +=  f"{self.exp.min_res:5.2f}"
 
         if self.exp.blacklevelp is not None:
-            text_cur_level = f"(blacklevel,whitelevel) = ({self.exp.blacklevelp:.2f}%,{self.exp.whitelevelp:.2f}%)"
-            text_min_level = f"(blacklevel,whitelevel) = ({self.exp.min_blacklevelp:.2f}%,{self.exp.min_whitelevelp:.2f}%)"
+            text['cur_level'] = f"(blacklevel,whitelevel) = ({self.exp.blacklevelp:.2f}%,{self.exp.whitelevelp:.2f}%)"
+            text['min_level'] = f"(blacklevel,whitelevel) = ({self.exp.min_blacklevelp:.2f}%,{self.exp.min_whitelevelp:.2f}%)"
 
-        text_cur_x = np.array2string(cur_x,    
+        text['cur_x'] = np.array2string(cur_x,    
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
-        text_min_x = np.array2string(self.exp.min_x,
+        text['min_x'] = np.array2string(self.exp.min_x,
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
 
         # needed for bug in rich table
-        text_cur_x = text_cur_x.strip(']').strip('[')
-        text_min_x = text_min_x.strip(']').strip('[')
+        text['cur_x'] = text['cur_x'].strip(']').strip('[')
+        text['min_x'] = text['min_x'].strip(']').strip('[')
+
+        self.mark_diff_in_key('cur_error','last_error')
+        self.mark_diff_in_key('cur_x','last_x')
 
         # ok we're now ready to define the table
-        table = Table(title=text_title, show_lines=True, show_header=False, )
+        table = Table(title=text['title'], show_lines=True, show_header=False, )
         #table.add_column("current", style="cyan", justify="center")
         #table.add_column("best", style="yellow", justify="center")
 
         if self.exp.blacklevelp is not None:
-            table.add_row(text_run, text_cur_error, text_cur_level, text_cur_x)
-            table.add_row("best"   , text_min_error, text_min_level, text_min_x)
+            table.add_row(text['run'], text['cur_error'], text['cur_level'], text['cur_x'])
+            table.add_row("best"     , text['min_error'], text['min_level'], text['min_x'])
         else:
-            table.add_row(text_run, text_cur_error, text_cur_x)
-            table.add_row("best"   , text_min_error, text_min_x)
+            table.add_row(text['run'], text['cur_error'], text['cur_x'])
+            table.add_row("best"     , text['min_error'], text['min_x'])
 
-            
         self.exp.console.print(table)
 
+    def mark_diff_in_key(self,cur_key, last_key):
+        text = self.text
+        if last_key not in text:
+            text[last_key] = text[cur_key];
+        str = mark_difference(text[cur_key], text[last_key])
+        self.text[last_key] = text[cur_key];
+        text[cur_key] = str
+        #pdb.set_trace() 
 
 # end class Operation
             
@@ -391,7 +504,7 @@ class SetupGenProfiles:
         # store profile generator function in exp object, don't worry if no definition
         self.exp.gen_profile = getattr(self, self.exp.operation, None)
 
-    def rgb_curves(self, x):
+    def rt_rgb_curves(self, x):
         # threshold to [0,1]
         x[x<0] = 0
         x[x>1] = 1
@@ -406,8 +519,23 @@ gCurve=1;0;0;0.25;{x[3]};0.50;{x[4]};0.75;{x[5]};1;1;
 bCurve=1;0;0;0.25;{x[6]};0.50;{x[7]};0.75;{x[8]};1;1;
     """)
 
+    def rt_channel_mixer(self,x):
 
-    def color_toning(self, x):
+        # needed for COBYLA
+        y = x * 1000
+
+        write_rt_profile( f"""
+# opt
+[Channel Mixer]
+Enabled=true
+Red={int(1000+x[0])};{int(y[1])};{int(y[2])};
+Green={int(x[3])};{int(1000+y[4])};{int(y[5])}
+Blue={int(x[6])};{int(y[7])};{int(1000+y[8])}
+
+""")
+
+
+    def rt_color_toning(self, x):
 
         # precondition needed to improve root
         y = x * 1000
@@ -462,7 +590,7 @@ Balance=0
 
 """)
 
-    def luminance_curve(self,x):
+    def rt_luminance_curve(self,x):
 
         write_rt_profile( f"""
 # opt
@@ -486,22 +614,7 @@ bCurve =1;0;0;0.5;{x[2]};1;1;
 """)
 
 
-    def channel_mixer(self,x):
-
-        # needed for COBYLA
-        y = x * 1000
-
-        write_rt_profile( f"""
-# opt
-[Channel Mixer]
-Enabled=true
-Red={int(1000+x[0])};{int(y[1])};{int(y[2])};
-Green={int(x[3])};{int(1000+y[4])};{int(y[5])}
-Blue={int(x[6])};{int(y[7])};{int(1000+y[8])}
-
-""")
-
-    def hsv_equalizer(self,x):
+    def rt_hsv_equalizer(self,x):
 
         # threshold to [0,1]
         x[x<0] = 0
@@ -561,6 +674,26 @@ VCurve=1;{VCurve}
 # common functions
 #
 
+def mark_difference(str1,str2):
+    # mark diff
+    str = ""
+    for ch1,ch2 in zip(str1,str2):
+        if ch1 == ch2:
+            str += ch1
+        else:
+            str += f"[bold magenta]{ch1}[/bold magenta]"
+    return str
+
+
+def get_csv_from_src(src):
+    # input/img00006_G000E0400_wb_ccm.dng -> input/img00006_G000E0400_wb_ccm.csv
+    base = src.rsplit('.',1)[0]
+    csv = base + ".csv"
+    if not os.path.isfile(csv):
+        print(f"ERROR: can't find csv file {csv} \n");
+        quit()
+    return csv
+    
 
 def get_args_string(x):
     # preprocess x 
@@ -571,7 +704,9 @@ def get_args_string(x):
     args = "\"";
     for i in range(x.size):
         args += str(x[i]) + " ";
+    args = args.strip()
     args += "\"";
+    
     return args
 
 def force_array_monotonic(x):
@@ -620,7 +755,6 @@ def constraint_monotonic(x):
         return -1
     if array_not_monotonic(yb):
         return -1
-    #pdb.set_trace();
     return 1
 
 
