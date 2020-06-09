@@ -4,15 +4,17 @@
 
 import os, sys, re, math
 import os.path
-from os import path
 import numpy as np
 import subprocess
 import pudb
 import shutil
+from collections import defaultdict
 
 import rich
 from rich.console import Console
 from rich.table import Table
+
+from json_tricks import dumps, loads
 
 
 class Exp:
@@ -22,11 +24,16 @@ class Exp:
         terminal = shutil.get_terminal_size((1024, 40))
         self.console = Console(width=terminal.columns, force_terminal=True)
 
+        # setup output dirs
+        os.makedirs("run/check", exist_ok = True) 
+
         # ok do the main init setup in 4 easy steps: 
         self.process_args()     # process args -> Exp object
         SetupVars(self)         # variables for each operation
         SetupCallback(self)     # define cost function
         SetupGenProfiles(self)  # profiles for running some functions
+        self.restore_best()
+        
         if self.args.verbose:
             print(f"Init Exp with tag: {self.tag} ")
 
@@ -35,21 +42,25 @@ class Exp:
         self.counter = 0
         self.min_x   = None
         self.min_res = None
+        self.min_blacklevelp = None
+        self.min_whitelevelp = None
+        self.check_image = None
         self.profile = None
         self.blacklevelp = None
         self.whitelevelp = None
 
         if self.args.src is None:
-            self.src = "images/input/img00006_G000E0400_wb_ccm.dng"
+            self.src = "inputs/images/img00006_G000E0400.dng"
         else:
             self.src = self.args.src
-        self.csv = get_csv_from_src(self.src)
-
 
         if self.args.dst is None:
-            self.dst = None
+            self.dst = get_destination_from_operation(self.src, self.operation)
         else:
             self.dst = self.args.dst
+
+        self.csv = get_csv_from_src(self.src)
+        print(f"src: {self.src} -> dst: {self.dst}")
 
         # mark this run
         if self.args.tag is None:
@@ -63,6 +74,89 @@ class Exp:
         self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0} 
         print(f"default multipliers : {self.cost_multiplier}")
         
+    #
+    # save best results
+    #
+    def save_best(self):
+
+        # save the error image
+        jsonfile, imgfile, exiffile = self.get_save_restore_filename(self.args.src, self.operation)
+        copy2(self.check_image, imgfile)
+
+        srcdng = "run/corrected.dng"
+        if self.dst is not None:
+            copy2(srcdng,self.dst)
+            if exiffile is not None:
+                # pu.db
+                self.ops.run_cmd(f"exiftool -args {self.dst} > {exiffile}")
+
+        # save the corrected image
+
+        data = self.get_image_data_for_json()
+        json = dumps(data, indent=4)
+
+        fp = open(jsonfile, 'w')
+        fp.write(json)
+        fp.close()
+
+    def get_image_data_for_json(self):
+        save_fields = """
+            args
+            operation
+            method
+            src
+            dst
+            tag
+            csv
+            
+            counter
+            cost_multiplier
+            bounds
+            profile
+            
+            min_x
+            min_blacklevelp
+            min_whitelevelp
+            min_error
+            min_res
+        """.split()
+
+        data = {}
+        for s in save_fields:
+            data[s] = getattr(self, s, None) 
+        return data
+
+    #
+    # restore results if exists
+    #
+    def restore_best(self):
+
+        jsonfile, imgfile, dngfile = self.get_save_restore_filename(self.args.src, self.operation)
+        if not os.path.isfile(jsonfile): 
+            return
+
+        fp = open(jsonfile, 'r')
+        json = fp.read()
+        fp.close()
+
+        data = loads(json)
+        self.x0 = data['min_x']
+        print(f"restored results from file {jsonfile} :")
+        print(f"x0 = {self.x0}")
+
+    def get_save_restore_filename(self, src, operation):
+        base = src.rsplit('.',1)[0]
+        basename = os.path.basename(base)
+        dirname  = f"results/{basename}"
+        jsonfile = f"{dirname}/{operation}.json"
+        imgfile  = f"{dirname}/{operation}.jpg"
+        if operation.startswith("dng_"):
+            exiffile  = f"{dirname}/{operation}.exif"
+        else:
+            exiffile  = None
+        os.makedirs(dirname, exist_ok = True) 
+        return jsonfile, imgfile, exiffile
+
     def whoami(self, from_mod ):
         print("hello {0}. I am instance {1}".format(from_mod, self))
 
@@ -79,80 +173,71 @@ class SetupVars:
         func()
 
     def dng_wb(self):
-        # best dng ccm after wb cf=11.5
         self.exp.x0 = np.array( [
-                0.8, 
-                0.6, 
+                1.0, 
+                1.0, 
         ])
-        self.exp.bounds = [(0.4,2)] * self.exp.x0.size
-        # only really care about grey?
-        self.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
-        print(f"reset multipliers to : {self.cost_multiplier}")
+        self.exp.bounds = [(0.2,2)] * self.exp.x0.size
+        self.exp.constraints={"fun": constraint_positive, "type": "ineq"}
+        self.exp.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
+        print(f"reset multipliers to : {self.exp.cost_multiplier}")
+
+    def dng_wb_bl(self):
+        self.exp.x0 = np.array( [
+                1, 1,       # wb 
+                0, 0,       # bl, wl
+        ])
+        self.exp.bounds = [(0,2)] * self.exp.x0.size
+        self.exp.constraints={"fun": constraint_positive, "type": "ineq"}
+        self.exp.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
+        print(f"reset multipliers to : {self.exp.cost_multiplier}")
 
     def dng_ccm(self):
-        # best dng ccm after grey=20 deltaE 11.6
         # starting point
         self.exp.x0 = np.array([
             1.,  0,  0,
             0.,  1,  0,
             0.,  0,  1,
         ])
-
-        # grey=8 deltaE=14
-        if "img00006_" in self.exp.src:
-            self.exp.x0 = np.array( [
-                 2.521,-0.456,-0.199,
-                -0.416, 1.210, 0.174,
-                -0.212, 0.053, 3.328, 
-            ])
-
-        if "MG_0199" in self.exp.src:
-            self.exp.x0 = np.array([
-                0.970, 0.003, 0.003, 
-                0.003, 0.999,-0.001, 
-                0.006, 0.006, 1.006, 
-            ])
-
-
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
 
-    def dng_ccm_blacklevel(self):
-        # best dng ccm after grey=20 deltaE 11.6
-        # starting point
+    def dng_ccm_bl(self):
         self.exp.x0 = np.array([
             1.,  0,  0,
             0.,  1,  0,
             0.,  0,  1,  0, 0
         ])
-
-        if "CanonG10ColorTestChart" in self.exp.src:
-            x0 = np.array( [
-                1.141, 0.141, 0.141, 0.141, 1.141, 0.141, 0.141, 0.141, 1.141,-0.248, 1.766
-            ])
-        if "Df_WB_Demo006" in self.exp.src:
-            x0 = np.array( [
-                1.000,-0.001,-0.001, 0.000, 1.000, 0.030, 0.030,-0.032, 0.968,-0.492, 1.158
-            ])
-        if "MG_0709" in self.exp.src:
-            x0 = np.array( [
-                1.000, 0.000, 0.000, 0.000, 1.000, 0.000, 0.000, 0.000, 1.000,-0.923, 1.384 
-            ])
-        if "img00006_" in self.exp.src:
-            # grey=8 deltaE=14
-            self.exp.x0 = np.array( [
-                2.583,-0.414,-0.211,
-               -0.428, 1.306, 0.178,
-               -0.217, 0.055, 3.650, 1.021, 0.010 
-            ])
-        # for example2
-        if "MG_0199" in self.exp.src:
-            self.exp.x0 = np.array([
-                0.970, 0.003, 0.003, 
-                0.003, 0.999,-0.001, 
-                0.006, 0.006, 1.006, 0.975, 1.150
-            ])
-
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
+
+    def dng_wb_ccm(self):
+        self.exp.x0 = np.array([
+            1, 1,          #  wb 
+            1,  0,  0,     #  ccm
+            0,  1,  0,
+            0,  0,  1,
+        ])
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+        self.exp.cost_multiplier = {'greyFC_average': 0.1, 'deltaE_average': 0.9, 'deltaC_average': 0.0} 
+        print(f"reset multipliers to : {self.exp.cost_multiplier}")
+
+    def dng_wb_ccm_bl(self):
+        self.exp.x0 = np.array([
+            1, 1,          #  wb 
+            1,  0,  0,     #  ccm
+            0,  1,  0,     #  ccm 
+            0,  0,  1,     #  ccm 
+            0, 0,          #  bl,wl
+        ])
+        self.exp.x0 = np.array([
+            0.8, 0.4,          #  wb 
+            1,  0,  0,     #  ccm
+            0,  1,  0,     #  ccm 
+            0,  0,  1,     #  ccm 
+            0.8, 0.1,          #  bl,wl
+        ])
+        self.exp.bounds = [(-2,2)] * self.exp.x0.size
+        self.exp.cost_multiplier = {'greyFC_average': 0.1, 'deltaE_average': 0.9, 'deltaC_average': 0.0} 
+        print(f"reset multipliers to : {self.exp.cost_multiplier}")
 
     def eq_spline(self):
 
@@ -298,6 +383,7 @@ class SetupCallback:
     def __init__(self, exp):
         self.exp = exp
         self.ops = Operation(exp)
+        self.exp.ops = self.ops # alias
         # just store function for later in Exp object
         self.exp.fun = getattr(self, self.exp.operation, None)
         if not self.exp.fun:
@@ -309,46 +395,96 @@ class SetupCallback:
                 print(f"ERROR: handler not found for operation {self.exp.operation}")
                 breakpoint();
 
+    def set_blackwhite_level(self, bl, wl):
+        # assume 16bit images
+        # TODO: make it work for 8-bit inputs
+        # for eg2 Black=1024 White=15600
+        bl = clamp(bl,0,2)
+        wl = clamp(wl,0,2)
+        sixteenbit = 2**16 - 1
+
+        # bl=2 makes black=10% while wl=2 makes white=20%
+        self.exp.blacklevelp = 5 * bl 
+        self.exp.whitelevelp = 100 - (40 * wl)
+        self.exp.blacklevel  = int(sixteenbit * self.exp.blacklevelp / 100.0)
+        self.exp.whitelevel  = int(sixteenbit * self.exp.whitelevelp / 100.0)
+
 
     def dng_wb(self,x):
+
         # only allow R and B to vary holding G at 1
-        args = f"""\"{x[0]} 1.0 {x[1]}\" """
+        r,g,b = (x[0], 1, x[1])
+
+        #force r and b to be positive
+        if r < 0: return 100 - 100 * r 
+        if b < 0: return 100 - 100 * b 
+            
+        args = f"""\"{r} {g} {b}\" """
         
-        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -AsShotNeutral={args} -o images/run/corrected.dng  {self.exp.src}")
-        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
+        self.ops.run_cmd(f"/bin/rm -f run/corrected.dng ; exiftool -AsShotNeutral={args} -o run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
+        res = self.ops.check_results(x)
+        return res
+
+    # white balance with blacklevel/whitelevel
+    def dng_wb_bl(self,x):
+
+        # only allow R and B to vary holding G at 1
+        r,g,b = (x[0], 1, x[1])
+        self.set_blackwhite_level(x[2], x[3])
+
+        #force r and b to be positive
+        if r < 0:
+            res = 100 - 100 * r 
+            return res
+
+        if b < 0:
+            res = 100 - 100 * b 
+            return res
+            
+        args = f"""\"{r} {g} {b}\" """
+        self.ops.run_cmd(f"/bin/rm -f run/corrected.dng ; exiftool -AsShotNeutral={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
         res = self.ops.check_results(x)
         return res
 
     def dng_ccm (self,x):
         args = get_args_string(x)
-        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o images/run/corrected.dng  {self.exp.src}")
-        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
+        self.ops.run_cmd(f"/bin/rm -f run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
         res = self.ops.check_results(x)
         return res
 
-    def dng_ccm_blacklevel(self,x):
+    def dng_ccm_bl(self,x):
         # extra conf at end for blacklevel
         y = x[0:9:1] # first 9 elements only
         args = get_args_string(y)
-        # hack
-        #x[9] = 1
-        #x[10] = 1
+        self.set_blackwhite_level(x[9], x[10])
 
-        # assume 16bit images
-        # for eg2 Black=1024 White=15600
-        sixteenbit = 2**16 - 1
-        #blacklevel = int(x[9]  * (4000.0/2.0)) # blacklevel limit should be around 4000
-        #whitelevel = sixteenbit - int(x[10] * (40000.0/2.0)) # whitelevel 
+        self.ops.run_cmd(f"/bin/rm -f run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
+        res = self.ops.check_results(x)
+        return res
 
-        # for exp2 blacklevel = 1024 whitelevel = 15600
-        blacklevel = int(x[9]  * 4096) # blacklevel = 1024
-        whitelevel = sixteenbit - int(x[10] * 49935) # whitelevel = 15600
+    def dng_wb_ccm_bl(self,x):
 
-        self.exp.blacklevelp =  blacklevel * 100.0/sixteenbit
-        self.exp.whitelevelp =  whitelevel * 100.0/sixteenbit
+        # first 2 elements are for wb
+        r,g,b = (x[0], 1, x[1])
+        args_wb = f"""\"{r} {g} {b}\" """
 
-        self.ops.run_cmd(f"/bin/rm -f images/run/corrected.dng ; exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={blacklevel} -IFD0:WhiteLevel={whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={blacklevel} -SubIFD:WhiteLevel={whitelevel}  -o images/run/corrected.dng  {self.exp.src}")
-        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o images/run/corrected.jpg -c images/run/corrected.dng")
+        #force r and b to be positive
+        if r < 0: return 100 - 100 * r 
+        if b < 0: return 100 - 100 * b 
+
+        # next 9 elements for ccm
+        y = x[2:11:1] 
+        args_ccm = get_args_string(y)
+
+        # last 2 elements for bl,wl
+        self.set_blackwhite_level(x[11], x[12])
+
+        self.ops.run_cmd(f"/bin/rm -f run/corrected.dng ; exiftool -AsShotNeutral={args_wb}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args_ccm} -ColorMatrix2={args_ccm} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.src}")
+        self.ops.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
         res = self.ops.check_results(x)
         return res
 
@@ -358,12 +494,12 @@ class SetupCallback:
 
     def rt_generic(self,x):
         self.exp.gen_profile(x)
-        self.ops.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p profile.pp3 -o images/run/corrected.jpg -c {self.exp.src}")
+        self.ops.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p profile.pp3 -o run/corrected.jpg -c {self.exp.src}")
         return self.ops.check_results(x)
 
     def eq_generic(self,x):
         args = get_args_string(x)
-        self.ops.run_cmd(f"./bin/rawtherapee-cli -Y -o images/run/corrected.jpg -e {self.exp.operation} -m {args} -c {self.exp.src}")
+        self.ops.run_cmd(f"./bin/rawtherapee-cli -Y -o run/corrected.jpg -e {self.exp.operation} -m {args} -c {self.exp.src}")
         return self.ops.check_results(x)
 
 # end class SetupCallback
@@ -376,26 +512,34 @@ class Operation:
 
     def run_cmd(self, cmd):
         out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        # TODO: stop rt from printing stderr unless errors...
         if  len(out.stderr) > 0:
-            print(out.stderr, file=sys.stderr)
+            #print("STDERR: ", out.stderr, file=sys.stderr)
+            print("STDERR: ", out.stderr, flush=True)
             breakpoint();
-        #pu.db
         if self.exp.args.verbose:
             print(out)
         return out
 
-    def check_results(self,x):
-        out = self.run_cmd(f"./bin/macduff images/run/corrected.jpg images/run/check.jpg --restore {self.exp.csv}")
-        cur_res = self.look_thru_cmd_output(x,out)
+    def check_results(self, x):
+        out = self.run_cmd(f"./bin/macduff run/corrected.jpg run/check.jpg --restore {self.exp.csv}")
+        self.exp.cur_x   = x
+        self.exp.cur_res = self.look_thru_cmd_output(out)
         # store check image with attributes
-        self.exp.counter += 1
-        check_image = f"images/results/check_{self.exp.tag}_run{self.exp.counter}.jpg"
-        comment = f""" args:{self.exp.args},x:{x},res:{cur_res},error:{self.exp.cur_error} """
-        cmd = f"""/bin/rm -f {check_image} ;  exiftool -o {check_image} -comment="{comment}" images/run/check.jpg"""
+        #self.exp.counter += 1
+        self.exp.check_image = f"run/check/check_{self.exp.tag}_run{self.exp.counter}.jpg"
+        data = self.exp.get_image_data_for_json()
+        comment = dumps(data)
+        #comment = f""" args:{self.exp.args},x:{self.exp.cur_x},res:{self.exp.cur_res},error:{self.exp.cur_error} """
+        cmd = f"""/bin/rm -f {self.exp.check_image} ;  exiftool -o {self.exp.check_image} -comment="{comment}" run/check.jpg"""
         self.run_cmd(cmd)
-        return cur_res
+        
+        self.record_if_best_results()
+        self.print_status()
+        #pu.db
+        return self.exp.cur_res
 
-    def look_thru_cmd_output(self, cur_x, out):
+    def look_thru_cmd_output(self, out):
         # grey_average =  62.1
         self.exp.cur_error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
         m = re.findall('(\w+_average) *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
@@ -406,26 +550,28 @@ class Operation:
         cur_res = 0
         for thing,value in self.exp.cur_error.items():
             cur_res += self.exp.cost_multiplier[thing] * value 
+        self.exp.cur_res = cur_res
+        return cur_res
 
+    def record_if_best_results(self):
         if self.exp.min_res is None:
-            self.exp.min_res = cur_res
-        self.exp.min_res = min(self.exp.min_res,cur_res)
+            self.exp.min_res = self.exp.cur_res
+        self.exp.min_res = min(self.exp.min_res,self.exp.cur_res)
 
         # record this state if res is optimal
-        if math.isclose(cur_res, self.exp.min_res, rel_tol=1e-3):
-            self.exp.min_x = cur_x
+        if math.isclose(self.exp.cur_res, self.exp.min_res, rel_tol=1e-3):
+            self.exp.min_x = self.exp.cur_x
             self.exp.min_error = self.exp.cur_error
             if self.exp.blacklevelp is not None:
                 self.exp.min_blacklevelp = self.exp.blacklevelp
             if self.exp.whitelevelp is not None:
                 self.exp.min_whitelevelp = self.exp.whitelevelp
+            # save results to file for later runs
+            self.exp.save_best()
 
-        self.exp.res = cur_res
-        self.exp.cur_res = cur_res
-        self.print_status(cur_x)
-        return cur_res
 
-    def print_status(self, cur_x):
+
+    def print_status(self):
 
         CURSOR_UP_ONE = '\x1b[1A'
         ERASE_LINE = '\x1b[2K'
@@ -456,10 +602,10 @@ class Operation:
         text['min_error'] +=  f"{self.exp.min_res:5.2f}"
 
         if self.exp.blacklevelp is not None:
-            text['cur_level'] = f"(blacklevel,whitelevel) = ({self.exp.blacklevelp:.2f}%,{self.exp.whitelevelp:.2f}%)"
-            text['min_level'] = f"(blacklevel,whitelevel) = ({self.exp.min_blacklevelp:.2f}%,{self.exp.min_whitelevelp:.2f}%)"
+            text['cur_level'] = f"(black,white) = ({self.exp.blacklevelp:.2f}%,{self.exp.whitelevelp:.2f}%)"
+            text['min_level'] = f"(black,white) = ({self.exp.min_blacklevelp:.2f}%,{self.exp.min_whitelevelp:.2f}%)"
 
-        text['cur_x'] = np.array2string(cur_x,    
+        text['cur_x'] = np.array2string(self.exp.cur_x,    
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
         text['min_x'] = np.array2string(self.exp.min_x,
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
@@ -484,6 +630,8 @@ class Operation:
             table.add_row("best"     , text['min_error'], text['min_x'])
 
         self.exp.console.print(table)
+        #self.restore_best()
+        
 
     def mark_diff_in_key(self,cur_key, last_key):
         text = self.text
@@ -674,6 +822,29 @@ VCurve=1;{VCurve}
 # common functions
 #
 
+#
+# magic to get src/dest, ie: 
+#   white balance is run on original 
+#   color correction is run on white balance
+#   blacklevel/whitelevel ccm is run on wb assuming bl
+#
+def get_destination_from_operation(src, operation):
+
+    if operation.startswith("dng_"):
+        suffix = operation.lstrip('dng')
+        basename = os.path.basename(src).rsplit('.',1)[0]
+        dst = f"inputs/dst/{basename}{suffix}.dng"
+    else:
+        dst = None
+        
+    return dst
+
+
+def copy2(src,dst):
+    dirname = os.path.dirname(dst)
+    os.makedirs(dirname, exist_ok = True) 
+    shutil.copy2(src, dst)
+
 def mark_difference(str1,str2):
     # mark diff
     str = ""
@@ -686,7 +857,7 @@ def mark_difference(str1,str2):
 
 
 def get_csv_from_src(src):
-    # input/img00006_G000E0400_wb_ccm.dng -> input/img00006_G000E0400_wb_ccm.csv
+    # inputs/img00006_G000E0400_wb_ccm.dng -> inputs/img00006_G000E0400_wb_ccm.csv
     base = src.rsplit('.',1)[0]
     csv = base + ".csv"
     if not os.path.isfile(csv):
@@ -740,6 +911,13 @@ def array_not_monotonic(x):
     return False
 
 # inequality means return has to be positive to be accepted
+def constraint_positive(x):
+    if (x < 0).any():
+        return -1
+    else:        
+        return 1
+
+# inequality means return has to be positive to be accepted
 def constraint_monotonic(x):
     if (x < 0).any():
         return -1
@@ -764,3 +942,5 @@ def write_rt_profile(out):
     fp.close()
 
 
+def clamp(n, minn, maxn):
+    return min(max(n, minn), maxn)

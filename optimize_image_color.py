@@ -15,7 +15,7 @@ from optimize_color import opt
 operations = {}
 
 # white balance and color correction matrix
-operations['dng_opt'] = "dng_wb dng_ccm dng_ccm_blacklevel".split()
+operations['dng_opt'] = "dng_wb dng_wb_bl dng_ccm dng_ccm_bl dng_wb_ccm dng_wb_ccm_bl".split()
 
 # use rt to solve color issues
 operations['rt_opt'] = """
@@ -32,13 +32,12 @@ operations['eq_opt'] = """
     eq_root_polynomial
     eq_multi_ccm2
     eq_multi_ccm4
-    eq_gamma_scale
 """.split();
 
 # expanded options (also form valid groupings for arguments)
 # ie calling wb_ccm will invoke both dng_wb and dng_ccm
 operations['all'] = operations['dng_opt'] + operations['rt_opt'] + operations['eq_opt']
-operations['default'] = "dng_ccm_blacklevel rt_rgb_curves".split()
+operations['default'] = "dng_ccm_bl rt_rgb_curves".split()
 
 # expand keys of dict as options, eg -operation default
 operations_choices = operations['all'] + list(operations.keys())
@@ -78,6 +77,7 @@ def parse_args() -> argparse.Namespace:
         description='run color correction optimization on macbeth image')
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--save_images', action='store_true')
+    parser.add_argument('--no_auto_src', action='store_true')
     parser.add_argument('--tag')
     parser.add_argument('--src')
     parser.add_argument('--dst')
