@@ -77,7 +77,6 @@ def parse_args() -> argparse.Namespace:
         description='run color correction optimization on macbeth image')
     parser.add_argument('--verbose', action='store_true')
     parser.add_argument('--save_images', action='store_true')
-    parser.add_argument('--no_auto_src', action='store_true')
     parser.add_argument('--tag')
     parser.add_argument('--src')
     parser.add_argument('--dst')

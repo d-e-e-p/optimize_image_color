@@ -2,7 +2,7 @@
 #
 #
 
-import os, sys, re, math
+import os, sys, re, math, copy
 import os.path
 import numpy as np
 import subprocess
@@ -16,6 +16,14 @@ from rich.table import Table
 
 from json_tricks import dumps, loads
 
+class Res:
+    def __init__(self):
+        self.x   = None
+        self.blacklevelp = None
+        self.whitelevelp = None
+        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0} 
+        self.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
+        self.cost = None
 
 class Exp:
     def __init__(self, args, operation):
@@ -24,8 +32,6 @@ class Exp:
         terminal = shutil.get_terminal_size((1024, 40))
         self.console = Console(width=terminal.columns, force_terminal=True)
 
-        # setup output dirs
-        os.makedirs("run/check", exist_ok = True) 
 
         # ok do the main init setup in 4 easy steps: 
         self.process_args()     # process args -> Exp object
@@ -40,20 +46,17 @@ class Exp:
     def process_args(self):
         # globals
         self.counter = 0
-        self.min_x   = None
-        self.min_res = None
-        self.min_blacklevelp = None
-        self.min_whitelevelp = None
+        self.cur_res = Res() 
+        self.min_res = Res() 
         self.check_image = None
         self.profile = None
-        self.blacklevelp = None
-        self.whitelevelp = None
         self.exifcmd = None
 
         if self.args.src is None:
             self.src = "inputs/images/img00006_G000E0400.dng"
         else:
             self.src = self.args.src
+        # assume csv is adjacent to source image
         self.csv = get_csv_from_src(self.src)
 
         self.set_save_restore_filenames(self.src, self.operation)
@@ -69,8 +72,7 @@ class Exp:
 
         self.constraints = ()   # can't be None
 
-        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0} 
-        print(f"default multipliers : {self.cost_multiplier}")
+        print(f"default multipliers : {self.cur_res.cost_multiplier}")
         
     #
     # save best results
@@ -110,17 +112,14 @@ class Exp:
             exifcmd
             
             counter
-            cost_multiplier
             bounds
             profile
-            
-            min_x
-            min_blacklevelp
-            min_whitelevelp
-            min_error
+
             min_res
+
         """.split()
 
+        # look thru object and save values
         data = {}
         for s in save_fields:
             data[s] = getattr(self, s, None) 
@@ -139,7 +138,17 @@ class Exp:
         fp.close()
 
         data = loads(json)
-        self.x0 = data['min_x']
+        # support old style and new style json
+        if 'min_x' in data.keys():
+            self.x0 = data['min_x']
+        elif 'min_res' in data.keys():
+            min_res = data['min_res']
+            self.x0 = min_res.x
+        else:
+            print(f"ERROR: could not load results from data = {data}")
+            breakpoint();
+            
+
         print(f"restored results from file {self.out['json']} :")
         print(f"x0 = {self.x0}")
 
@@ -532,53 +541,52 @@ class Operation:
         return out
 
     def check_results(self, x):
+
+        # record x
+        self.exp.cur_res.x = x
+
+        # setup output dirs
+        os.makedirs("run/check", exist_ok = True) 
+
         out = self.run_cmd(f"./bin/macduff run/corrected.jpg run/check.jpg --restore {self.exp.csv}")
-        self.exp.cur_x   = x
-        self.exp.cur_res = self.look_thru_cmd_output(out)
-        # store check image with attributes
-        #self.exp.counter += 1
-        self.exp.check_image = f"run/check/check_{self.exp.tag}_run{self.exp.counter}.jpg"
+        self.look_thru_cmd_output(out)
+        # store check image with exif attributes
+        self.exp.counter += 1
+        if self.exp.args.save_images:
+            self.exp.check_image = f"run/check/check_{self.exp.tag}_run{self.exp.counter}.jpg"
+        else:
+            self.exp.check_image = f"run/check/check_{self.exp.tag}.jpg"
         data = self.exp.get_image_data_for_json()
         comment = dumps(data)
-        #comment = f""" args:{self.exp.args},x:{self.exp.cur_x},res:{self.exp.cur_res},error:{self.exp.cur_error} """
         cmd = f"""/bin/rm -f {self.exp.check_image} ;  exiftool -o {self.exp.check_image} -comment='{comment}' run/check.jpg"""
         self.run_cmd(cmd)
         
         self.record_if_best_results()
         self.print_status()
         #pu.db
-        return self.exp.cur_res
+        return self.exp.cur_res.cost
 
     def look_thru_cmd_output(self, out):
         # grey_average =  62.1
-        self.exp.cur_error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
+        self.exp.cur_res.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
         m = re.findall('(\w+_average) *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
         for thing,value in m:
-            self.exp.cur_error[thing] = float(value)
+            self.exp.cur_res.error[thing] = float(value)
 
         # eg for white balance test ignore color metric .. focus on grey
-        cur_res = 0
-        for thing,value in self.exp.cur_error.items():
-            cur_res += self.exp.cost_multiplier[thing] * value 
-        self.exp.cur_res = cur_res
-        return cur_res
+        cost = 0
+        for thing,value in self.exp.cur_res.error.items():
+            cost += self.exp.cur_res.cost_multiplier[thing] * value 
+        self.exp.cur_res.cost = cost
 
     def record_if_best_results(self):
-        if self.exp.min_res is None:
-            self.exp.min_res = self.exp.cur_res
-        self.exp.min_res = min(self.exp.min_res,self.exp.cur_res)
-
-        # record this state if res is optimal
-        if math.isclose(self.exp.cur_res, self.exp.min_res, rel_tol=1e-3):
-            self.exp.min_x = self.exp.cur_x
-            self.exp.min_error = self.exp.cur_error
-            if self.exp.blacklevelp is not None:
-                self.exp.min_blacklevelp = self.exp.blacklevelp
-            if self.exp.whitelevelp is not None:
-                self.exp.min_whitelevelp = self.exp.whitelevelp
-            # save results to file for later runs
-            self.exp.save_best()
-
+        if self.exp.min_res.cost is None:
+            self.exp.min_res = copy.deepcopy(self.exp.cur_res)
+        else:
+            if self.exp.cur_res.cost < self.exp.min_res.cost:
+                # record and save results to file for posterity
+                self.exp.min_res = copy.deepcopy(self.exp.cur_res)
+                self.exp.save_best()
 
 
     def print_status(self):
@@ -586,7 +594,10 @@ class Operation:
         CURSOR_UP_ONE = '\x1b[1A'
         ERASE_LINE = '\x1b[2K'
 
+        # to make it easier to type
         text = self.text
+        cur_res = self.exp.cur_res
+        min_res = self.exp.min_res
 
         # first define all the text
         text['title'] = f"input={self.exp.basename} op={self.exp.operation} method={self.exp.method}"
@@ -595,10 +606,11 @@ class Operation:
         text['cur_error'] =  "(E,C,G) = "
         text['min_error'] =  "(E,C,G) = "
 
+
         i = 0
         for type in ['deltaE_average', 'deltaC_average', 'greyFC_average']:
-                text['cur_error'] +=  f"{self.exp.cost_multiplier[type]} X {self.exp.cur_error[type]:4.1f} " 
-                text['min_error'] +=  f"{self.exp.cost_multiplier[type]} X {self.exp.min_error[type]:4.1f} " 
+                text['cur_error'] +=  f"{cur_res.cost_multiplier[type]} X {cur_res.error[type]:4.1f} " 
+                text['min_error'] +=  f"{min_res.cost_multiplier[type]} X {min_res.error[type]:4.1f} " 
                 if i == 2:
                     text['cur_error'] +=  " = "
                     text['min_error'] +=  " = "
@@ -608,16 +620,16 @@ class Operation:
                 i += 1;
         
         
-        text['cur_error'] +=  f"{self.exp.cur_res:5.2f}"
-        text['min_error'] +=  f"{self.exp.min_res:5.2f}"
+        text['cur_error'] +=  f"{cur_res.cost:5.2f}"
+        text['min_error'] +=  f"{min_res.cost:5.2f}"
 
-        if self.exp.blacklevelp is not None:
-            text['cur_level'] = f"(black,white) = ({self.exp.blacklevelp:.2f}%,{self.exp.whitelevelp:.2f}%)"
-            text['min_level'] = f"(black,white) = ({self.exp.min_blacklevelp:.2f}%,{self.exp.min_whitelevelp:.2f}%)"
+        if cur_res.blacklevelp is not None:
+            text['cur_level'] = f"(black,white) = ({cur_res.blacklevelp:.2f}%,{cur_res.whitelevelp:.2f}%)"
+            text['min_level'] = f"(black,white) = ({min_res.blacklevelp:.2f}%,{min_res.whitelevelp:.2f}%)"
 
-        text['cur_x'] = np.array2string(self.exp.cur_x,    
+        text['cur_x'] = np.array2string(cur_res.x,    
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
-        text['min_x'] = np.array2string(self.exp.min_x,
+        text['min_x'] = np.array2string(min_res.x,
             max_line_width=1000,precision=3,separator=",",floatmode='fixed',sign=' ', formatter={'float_kind':lambda x: "% 4.3f" % x})
 
         # needed for bug in rich table
@@ -632,7 +644,7 @@ class Operation:
         #table.add_column("current", style="cyan", justify="center")
         #table.add_column("best", style="yellow", justify="center")
 
-        if self.exp.blacklevelp is not None:
+        if cur_res.blacklevelp is not None:
             table.add_row(text['run'], text['cur_error'], text['cur_level'], text['cur_x'])
             table.add_row("best"     , text['min_error'], text['min_level'], text['min_x'])
         else:
