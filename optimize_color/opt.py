@@ -13,7 +13,9 @@ from optimize_color import cmd
 
 def run_opt(e):
     if    (e.method == 'basinhopping'):           
-        res = basinhopping(e.fun, e.x0, disp=True)
+        options = dict({"maxiter":2})
+        minimizer_kwargs = {"method": "tnc", "tol": 0.1, "bounds":e.bounds, "constraints":e.constraints, "options":options}
+        res = basinhopping(e.fun, e.x0, minimizer_kwargs=minimizer_kwargs, disp=True)
     elif  (e.method == 'differential_evolution'): 
         res = differential_evolution(e.fun, bounds=e.bounds, disp=True, polish=True)
     elif  (e.method == 'dual_annealing'):         
@@ -74,6 +76,7 @@ def execute(args, operations,  solvers):
             print(f"running operation: {op} using  method: {e.method} ------------------")
             lowest_optimization_result, e.x0 = run_opt(e)
             print(f"lowest_optimization_result: {lowest_optimization_result} operation: {op} method: {e.method}")
+        del e
     print(args)
     print("done")
 

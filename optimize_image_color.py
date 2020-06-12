@@ -1,5 +1,7 @@
 #!/usr/bin/python3.8
 #
+# improve color in raw images by optimizing color correction matrix 
+# and other methods
 #
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -8,6 +10,13 @@ import argparse
 from exitstatus import ExitStatus
 
 from optimize_color import opt
+
+__author__      = 'deep@tensorfield.ag'
+__copyright__   = 'Copyright (C) 2020 - Tensorfield Ag '
+__license__     = 'New BSD License - https://opensource.org/licenses/BSD-3-Clause'
+__maintainer__  = 'deep'
+__status__      = 'Development'
+
 
 #
 # problem to run for optimization
