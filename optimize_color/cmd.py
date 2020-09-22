@@ -29,8 +29,8 @@ class Res:
         self.x   = None
         self.blacklevelp = None
         self.whitelevelp = None
-        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0} 
-        self.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
+        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0, 'noise_average': 0} 
+        self.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000, 'noise_average': 5000}
         self.cost = None
 # inputs
 class Run:
@@ -39,6 +39,9 @@ class Run:
         self.operation = operation
         self.counter = 0
         self.check_image = None
+        #self.default_profile  = "/usr/local/share/rawtherapee/profiles/Standard Film Curve - ISO Medium.pp3"
+        self.default_profile  = "/home/user/build/tensorfield/snappy/profiles/autoiso.pp3"
+        #self.default_profile  = None
         self.profile = None
         self.exifcmd = None
         self.text = {}
@@ -65,6 +68,7 @@ class Out:
         dirname  = f"results/{self.basename}"
         os.makedirs(dirname, exist_ok = True)
 
+        self.dirname       = f"{dirname}"
         self.json          = f"{dirname}/{operation}.json"
         self.check_image   = f"{dirname}/{operation}.jpg"
         self.cost_plotfile = f"{dirname}/{operation}_cost.png"
@@ -106,6 +110,9 @@ class Exp:
         self.cur_res = Res() 
         self.min_res = Res() 
 
+        # TODO: fix
+        self.dirname = self.out.dirname
+
         print(f"src: {self.run.src}") 
         print(f"dst: {self.out.dng}") 
         print(f"default multipliers : {self.cur_res.cost_multiplier}")
@@ -132,13 +139,14 @@ class Exp:
         copy2(self.run.check_image, self.out.check_image)
 
         if self.out.dng is not None:
-            src_in_dng = "run/corrected.dng"
+            src_in_dng = f"{self.dirname}/corrected.dng"
             copy2(src_in_dng, self.out.dng)
             if self.out.exif is not None:
                 self.run_cmd(f"exiftool -args {self.out.dng} > {self.out.exif}")
 
         if self.out.csv is not None:
-            copy2(self.run.csv, self.out.csv)
+            if (self.run.csv != self.out.csv):
+                copy2(self.run.csv, self.out.csv)
             
         # save the best results x and min_res values
         data = self.get_image_data_for_json()
@@ -197,8 +205,13 @@ class Exp:
         # first store the cmd for output
         self.run.exifcmd = exifcmd
 
-        self.run_cmd(f"/bin/rm -f run/corrected.dng ; {exifcmd}")
-        self.run_cmd("/usr/local/bin/rawtherapee-cli -Y -o run/corrected.jpg -c run/corrected.dng")
+        if self.run.default_profile is not None:
+            profile_cmd = f" -p '{self.run.default_profile}' "
+        else:
+            profile_cmd = ""
+
+        self.run_cmd(f"/bin/rm -f {self.dirname}/corrected.dng ; {exifcmd}")
+        self.run_cmd(f"/usr/local/bin/rawtherapee-cli -q -Y {profile_cmd}  -o {self.dirname}/corrected.jpg -c {self.dirname}/corrected.dng")
         res = self.check_results(x)
         return res
 
@@ -220,21 +233,21 @@ class Exp:
         self.cur_res.x = x
 
         # setup output dirs
-        os.makedirs("run/check", exist_ok = True) 
+        os.makedirs(f"{self.dirname}/check", exist_ok = True) 
 
-        out = self.run_cmd(f"./bin/macduff run/corrected.jpg run/check.jpg --restore {self.run.csv}")
+        out = self.run_cmd(f"./bin/macduff {self.dirname}/corrected.jpg {self.dirname}/check.jpg --restore {self.run.csv} --comment  'BL={self.cur_res.blacklevelp:.0f}% WL={self.cur_res.whitelevelp:.0f}%'")
         self.look_thru_cmd_output(out)
 
         # store check image with exif attributes
         self.run.counter += 1
         if self.run.args.save_images:
-            self.run.check_image = f"run/check/check_{self.run.tag}_run{self.run.counter}.jpg"
+            self.run.check_image = f"{self.dirname}/check/check_{self.run.tag}_run{self.run.counter}.jpg"
         else:
-            self.run.check_image = f"run/check/check_{self.run.tag}.jpg"
+            self.run.check_image = f"{self.dirname}/check/check_{self.run.tag}.jpg"
 
         data = self.get_image_data_for_json()
         comment = dumps(data)
-        cmd = f"""/bin/rm -f {self.run.check_image} ;  exiftool -o {self.run.check_image} -comment='{comment}' run/check.jpg"""
+        cmd = f"""/bin/rm -f {self.run.check_image} ;  exiftool -o {self.run.check_image} -comment='{comment}' {self.dirname}/check.jpg"""
         self.run_cmd(cmd)
         
         self.record_if_best_results()
@@ -245,7 +258,7 @@ class Exp:
 
     def look_thru_cmd_output(self, out):
         # grey_average =  62.1
-        self.cur_res.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000}
+        self.cur_res.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000, 'noise_average': 5000,}
         m = re.findall('(\w+_average) *= *([0-9]*[.,]{0,1}[0-9]*)',str(out.stdout))
         for thing,value in m:
             self.cur_res.error[thing] = float(value)
@@ -260,13 +273,10 @@ class Exp:
         self.cur_res.cost = cost
 
     def record_if_best_results(self):
-        if self.min_res.cost is None:
+        if (self.min_res.cost is None) or (self.cur_res.cost < self.min_res.cost):
+            # record and save results to file for posterity
             self.min_res = copy.deepcopy(self.cur_res)
-        else:
-            if self.cur_res.cost < self.min_res.cost:
-                # record and save results to file for posterity
-                self.min_res = copy.deepcopy(self.cur_res)
-                self.save_best()
+            self.save_best()
 
     def append_vector_and_results(self):
 
@@ -295,7 +305,7 @@ class Exp:
 
         self.ax1.grid(True, linestyle='dotted')
         self.ax2.axis('off')
-        print(f"now gcf = {plt.gcf()}")
+        print(f"gcf = {plt.gcf()}")
 
         # figure2
         self.fig2 = plt.figure(2)
@@ -315,16 +325,16 @@ class Exp:
     def plot_status(self, final=False):
 
         # skip a bunch of images before updating plot
-        num_of_images_to_skip = 1
-        #num_of_images_to_skip = 25
+        #num_of_images_to_skip = 1
+        num_of_images_to_skip = 25
         if not final and (self.run.counter % num_of_images_to_skip != 0):
             return
 
         # if plot is init to 640x480, we need to reinit
         # this happens once at start and another time at final
         #plt.figure(1)
-        if plt.gcf().bbox_inches.width == 6.4 :
-            print(f"gcf = {plt.gcf()}")
+        if (not hasattr(self, 'fig1')):
+            print(f"creating plot figure")
             self.setup_plots()
 
         self.plot_convergence()
@@ -361,9 +371,9 @@ class Exp:
     # parameteters
     def plot_optimization(self):
 
-        n = self.x0.size + 1
+        n = self.x0.size 
         self.fig2.suptitle(self.run.text['title'], color='green', fontsize=28, fontweight='bold')
-        data = self.parallel_coordinates_series.reshape(-1,n)
+        data = self.parallel_coordinates_series.reshape(-1,n+1) # includes n*x + results => n+1 pts/run
         df = pd.DataFrame(data=data)
 
         # too small ...
@@ -563,7 +573,7 @@ class SetupVars:
             0.8, 0.1,          #  bl,wl
         ])
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
-        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.0, 'deltaE_average': 1.0, 'deltaC_average': 0.0} 
+        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.0, 'deltaE_average': 1.0, 'deltaC_average': 0.0, 'noise_average': 0.0, } 
         print(f"reset multipliers to : {self.exp.cur_res.cost_multiplier}")
 
     def eq_spline(self):
@@ -666,6 +676,7 @@ class SetupVars:
 class SetupCallback:
     def __init__(self, exp):
         self.exp = exp
+        self.dirname = self.exp.dirname
         # just store function for later in Exp object
         self.exp.fun = getattr(self, self.exp.run.operation, None)
         if not self.exp.fun:
@@ -689,7 +700,7 @@ class SetupCallback:
             
         args = f"""\"{r} {g} {b}\" """
         
-        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args} -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1= -ColorMatrix2= -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     def dng_wb_ccm(self,x):
@@ -706,7 +717,7 @@ class SetupCallback:
         y = x[2:11:1] 
         args_ccm = get_args_string(y)
 
-        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args_wb}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args_ccm} -ColorMatrix2={args_ccm} -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args_wb}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args_ccm} -ColorMatrix2={args_ccm} -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     # white balance with blacklevel/whitelevel
@@ -726,12 +737,14 @@ class SetupCallback:
             return res
             
         args = f"""\"{r} {g} {b}\" """
-        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     def dng_ccm (self,x):
         args = get_args_string(x)
-        res = self.exp.run_exifcmd(x, f"exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o {self.dirname}/corrected.dng  {self.exp.run.src}")
+        # TEMP HACK FORCE wb
+        #res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral=\"0.9193107376656316 1 0.5756097899548464\"  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     def dng_ccm_bl(self,x):
@@ -740,7 +753,9 @@ class SetupCallback:
         args = get_args_string(y)
         self.set_blackwhite_level(x[9], x[10])
 
-        res = self.exp.run_exifcmd(x, f"exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o {self.dirname}/corrected.dng  {self.exp.run.src}")
+        # TEMP HACK FORCE wb
+        #res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral=\"0.9193107376656316 1 0.5756097899548464\"  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args} -ColorMatrix2={args} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     def dng_wb_ccm_bl(self,x):
@@ -760,7 +775,7 @@ class SetupCallback:
         # last 2 elements for bl,wl
         self.set_blackwhite_level(x[11], x[12])
 
-        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args_wb}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args_ccm} -ColorMatrix2={args_ccm} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o run/corrected.dng  {self.exp.run.src}")
+        res = self.exp.run_exifcmd(x, f"exiftool -AsShotNeutral={args_wb}  -ForwardMatrix1= -ForwardMatrix2= -ColorMatrix1={args_ccm} -ColorMatrix2={args_ccm} -IFD0:BlackLevel={self.exp.blacklevel} -IFD0:WhiteLevel={self.exp.whitelevel} -SubIFD:BlackLevelRepeatDim= -SubIFD:BlackLevel={self.exp.blacklevel} -SubIFD:WhiteLevel={self.exp.whitelevel}  -o {self.dirname}/corrected.dng  {self.exp.run.src}")
         return res
 
     def eq_spline(self,x):
@@ -769,12 +784,12 @@ class SetupCallback:
 
     def rt_generic(self,x):
         self.exp.gen_profile(x)
-        self.exp.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p run/profile.pp3 -o run/corrected.jpg -c {self.exp.run.src}")
+        self.exp.run_cmd(f"/usr/local/bin/rawtherapee-cli -Y -p {self.dirname}/profile.pp3 -o {self.dirname}/corrected.jpg -c {self.exp.run.src}")
         return self.exp.check_results(x)
 
     def eq_generic(self,x):
         args = get_args_string(x)
-        self.exp.run_cmd(f"./bin/rawtherapee-cli -Y -o run/corrected.jpg -e {self.exp.run.operation} -m {args} -c {self.exp.run.src}")
+        self.exp.run_cmd(f"./bin/rawtherapee-cli -Y -o {self.dirname}/corrected.jpg -e {self.exp.run.operation} -m {args} -c {self.exp.run.src}")
         return self.exp.check_results(x)
 
     def set_blackwhite_level(self, bl, wl):
@@ -973,31 +988,26 @@ VCurve=1;{VCurve}
 
 # from https://benalexkeen.com/parallel-coordinates-in-matplotlib/
 
-def create_parallel_coordinates_plot(fig, axes, n, df):
+def create_parallel_coordinates_plot(fig, axes, cost_index, df_orig):
 
-    cost = 9
-
-    hist, bin_edges = np.histogram(df[cost], bins=10 )
+    df = df_orig.copy()
+    hist, bin_edges = np.histogram(df[cost_index], bins=20 )
     cut_points = [ 0, bin_edges[1], bin_edges[3], bin_edges[7], bin_edges[-1], ]
-    df[cost] = pd.cut(df[cost], cut_points)
+    #df[cost_index] = pd.cut(df[cost_index], cut_points)
 
 
-    cols = list(range(0, 9))
+    cols = list(range(0, cost_index))
     x = [i for i, _ in enumerate(cols)]
     colours = ['#2e8ad8', '#cd3785', '#c64c00', '#889a00']
 
-    print(f"x={x}")
-    for i, ax in enumerate(axes):
-        print(f"i:{i}")
-        print(f"i:{i} {x[i]} to {x[i+1]}")
-
     # create dict of categories: colours
-    colours = {df[cost].cat.categories[i]: colours[i] for i, _ in enumerate(df[cost].cat.categories)}
+    #colours = {df[cost_index].cat.categories[i]: colours[i] for i, _ in enumerate(df[cost_index].cat.categories)}
 
     # Create (X-1) sublots along x axis
     #fig, axes = plt.subplots(1, len(x)-1, sharey=False, figsize=(15,5))
     for i, ax in enumerate(axes):
-        ax.set(xlabel=f"x{i}")
+        ax.clear()
+        #ax.set(xlabel=f"x{i}")
 
     # Get min, max and range for each column
     # Normalize the data for each column
@@ -1007,16 +1017,38 @@ def create_parallel_coordinates_plot(fig, axes, n, df):
         if np.ptp(df[col]) > 0:
             df[col] = np.true_divide(df[col] - df[col].min(), np.ptp(df[col]))
 
-    print(f"df3:{df}")
-    # convert to list
-    #if type(axes) is not list:
-    #    axes = [axes]
-    
+    #print(f"df after={df}")
+    # convert singleton to list
+    if type(axes) is not list:
+        axes = [axes]
+
+    (cost_min, cost_max) = (df[cost_index].min(), df[cost_index].max())
     for i, ax in enumerate(axes):
         for idx in df.index:
-            res_category = df.loc[idx, cost]
+            #res_category = df.loc[idx, cost_index]
             #print(f"plot x={x} d={df.loc[idx, cols]} c={colours[res_category]}")
-            ax.plot(x, df.loc[idx, cols], colours[res_category])
+            # lower cost => darker
+            cost_val = df.loc[idx, cost_index]
+            if cost_max > cost_min:
+                color_ratio = (cost_max - cost_val)/(cost_max - cost_min)
+            else:
+                color_ratio = 1
+            (r,g,b) = (1,0.5,0.5)
+            color=(color_ratio * r, color_ratio * g, b)
+            linewidth=1
+
+            if cost_val <= bin_edges[0]:
+                linewidth=3
+                color = "red"
+
+            # color for last idx
+            if (idx == df.index.size - 1):
+                linewidth=2
+                color = "yellow"
+
+            ax.plot(x, df.loc[idx, cols], linewidth=linewidth, color=color)
+            #print(f"line = {df.loc[idx, cols]} linewidth={linewidth} color_ratio={color_ratio}")
+
         ax.set_xlim([x[i], x[i+1]])
 
 
@@ -1047,11 +1079,19 @@ def create_parallel_coordinates_plot(fig, axes, n, df):
     set_ticks_for_axis(dim, ax, ticks=6)
     ax.set_xticklabels([cols[-2], cols[-1]])
 
+    ax.legend(
+        [plt.Line2D((0,1),(0,0), color="red"), plt.Line2D((0,1),(0,0), color="yellow")],
+        [f"{bin_edges[0]:.2f}", f"{cost_val:.2f}"],
+        bbox_to_anchor=(1.2, 1), loc=2, borderaxespad=0.)
+
+    """
     # Add legend to plot
     ax.legend(
-        [plt.Line2D((0,1),(0,0), color=colours[cat]) for cat in df[cost].cat.categories],
-        df[cost].cat.categories,
+        [plt.Line2D((0,1),(0,0), color=colours[cat]) for cat in df[cost_index].cat.categories],
+        df[cost_index].cat.categories,
         bbox_to_anchor=(1.2, 1), loc=2, borderaxespad=0.)
+
+    """
 
     # Remove space between subplots
     fig.subplots_adjust(wspace=0)
@@ -1190,7 +1230,7 @@ def strip_ansi_escape(sin):
     return sout
 
 def write_rt_profile(out):
-    fp = open('run/profile.pp3', 'w')
+    fp = open('{self.dirname}/profile.pp3', 'w')
     fp.write(out)
     fp.close()
 

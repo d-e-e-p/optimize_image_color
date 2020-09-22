@@ -24,10 +24,10 @@ __status__      = 'Development'
 operations = {}
 
 # white balance and color correction matrix
-operations['dng_opt'] = "dng_wb dng_wb_bl dng_ccm dng_ccm_bl dng_wb_ccm dng_wb_ccm_bl".split()
+operations['dng_all'] = "dng_wb dng_wb_bl dng_ccm dng_ccm_bl dng_wb_ccm dng_wb_ccm_bl".split()
 
 # use rt to solve color issues
-operations['rt_opt'] = """
+operations['rt_all'] = """
     rt_rgb_curves
     rt_channel_mixer
     rt_color_toning
@@ -36,7 +36,7 @@ operations['rt_opt'] = """
 """.split();
 
 # operate equation on rgb input values
-operations['eq_opt'] = """
+operations['eq_all'] = """
     eq_spline
     eq_root_polynomial
     eq_multi_ccm2
@@ -45,7 +45,7 @@ operations['eq_opt'] = """
 
 # expanded options (also form valid groupings for arguments)
 # ie calling wb_ccm will invoke both dng_wb and dng_ccm
-operations['all'] = operations['dng_opt'] + operations['rt_opt'] + operations['eq_opt']
+operations['all'] = operations['dng_all'] + operations['rt_all'] + operations['eq_all']
 operations['default'] = "dng_ccm_bl rt_rgb_curves".split()
 
 # expand keys of dict as options, eg -operation default
