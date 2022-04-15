@@ -16,6 +16,7 @@ from matplotlib import ticker
 import pandas as pd
 from collections import defaultdict
 import pudb
+import pdb
 
 import rich
 from rich.console import Console
@@ -29,7 +30,7 @@ class Res:
         self.x   = None
         self.blacklevelp = None
         self.whitelevelp = None
-        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0, 'noise_average': 0} 
+        self.cost_multiplier = {'greyFC_average': 0, 'deltaE_average': 1, 'deltaC_average': 0, 'noise_average': 1} 
         self.error = {'greyFC_average': 5000, 'deltaE_average': 5000, 'deltaC_average': 5000, 'noise_average': 5000}
         self.cost = None
 # inputs
@@ -40,7 +41,8 @@ class Run:
         self.counter = 0
         self.check_image = None
         #self.default_profile  = "/usr/local/share/rawtherapee/profiles/Standard Film Curve - ISO Medium.pp3"
-        self.default_profile  = "/home/user/build/tensorfield/snappy/profiles/autoiso.pp3"
+        #self.default_profile  = "/home/user/build/tensorfield/snappy/profiles/autoiso.pp3"
+        self.default_profile  = "/home/user/build/tensorfield/snappy/profiles/usda2.pp3"
         #self.default_profile  = None
         self.profile = None
         self.exifcmd = None
@@ -222,9 +224,10 @@ class Exp:
         if  len(out.stderr) > 0:
             #print("STDERR: ", out.stderr, file=sys.stderr)
             print("STDERR: ", out.stderr, flush=True)
-            breakpoint();
+            #breakpoint();
         if self.run.args.verbose:
             print(out)
+    
         return out
 
     def check_results(self, x):
@@ -235,7 +238,10 @@ class Exp:
         # setup output dirs
         os.makedirs(f"{self.dirname}/check", exist_ok = True) 
 
-        out = self.run_cmd(f"./bin/macduff {self.dirname}/corrected.jpg {self.dirname}/check.jpg --restore {self.run.csv} --comment  'BL={self.cur_res.blacklevelp:.0f}% WL={self.cur_res.whitelevelp:.0f}%'")
+        if self.cur_res.blacklevelp is not None:
+            out = self.run_cmd(f"./bin/macduff {self.dirname}/corrected.jpg {self.dirname}/check.jpg --restore {self.run.csv} --comment  'BL={self.cur_res.blacklevelp:.0f}% WL={self.cur_res.whitelevelp:.0f}%'")
+        else:
+            out = self.run_cmd(f"./bin/macduff {self.dirname}/corrected.jpg {self.dirname}/check.jpg --restore {self.run.csv} --comment  'BL={self.cur_res.blacklevelp} WL={self.cur_res.whitelevelp}'")
         self.look_thru_cmd_output(out)
 
         # store check image with exif attributes
@@ -323,12 +329,12 @@ class Exp:
 
 
     def plot_status(self, final=False):
-
         # skip a bunch of images before updating plot
         #num_of_images_to_skip = 1
         num_of_images_to_skip = 25
         if not final and (self.run.counter % num_of_images_to_skip != 0):
             return
+
 
         # if plot is init to 640x480, we need to reinit
         # this happens once at start and another time at final
@@ -426,15 +432,15 @@ class Exp:
         text['title'] = f"input={self.out.basename} op={self.run.operation} method={self.method}"
         text['run'] = f"run{self.run.counter}"
 
-        text['cur_error'] =  "(E,C,G) = "
-        text['min_error'] =  "(E,C,G) = "
+        text['cur_error'] =  "(E,C,G,N) = "
+        text['min_error'] =  text['cur_error'] 
 
 
         i = 0
-        for type in ['deltaE_average', 'deltaC_average', 'greyFC_average']:
+        for type in ['deltaE_average', 'deltaC_average', 'greyFC_average', 'noise_average']:
                 text['cur_error'] +=  f"{cur_res.cost_multiplier[type]} X {cur_res.error[type]:4.1f} " 
                 text['min_error'] +=  f"{min_res.cost_multiplier[type]} X {min_res.error[type]:4.1f} " 
-                if i == 2:
+                if i == 3:
                     text['cur_error'] +=  " = "
                     text['min_error'] +=  " = "
                 else:
@@ -516,7 +522,7 @@ class SetupVars:
         ])
         self.exp.bounds = [(0.2,2)] * self.exp.x0.size
         self.exp.constraints={"fun": constraint_positive, "type": "ineq"}
-        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
+        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1, 'noise_average': 0.0,} 
         print(f"reset multipliers to : {self.exp.cur_res.cost_multiplier}")
 
     def dng_wb_bl(self):
@@ -526,7 +532,7 @@ class SetupVars:
         ])
         self.exp.bounds = [(0,2)] * self.exp.x0.size
         self.exp.constraints={"fun": constraint_positive, "type": "ineq"}
-        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1} 
+        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.9, 'deltaE_average': 0, 'deltaC_average': 0.1, 'noise_average': 0.0,} 
         print(f"reset multipliers to : {self.exp.cur_res.cost_multiplier}")
 
     def dng_ccm(self):
@@ -554,7 +560,7 @@ class SetupVars:
             0,  0,  1,
         ])
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
-        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.1, 'deltaE_average': 0.9, 'deltaC_average': 0.0} 
+        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.1, 'deltaE_average': 0.9, 'deltaC_average': 0.0, 'noise_average': 0.0,} 
         print(f"reset multipliers to : {self.exp.cur_res.cost_multiplier}")
 
     def dng_wb_ccm_bl(self):
@@ -566,14 +572,19 @@ class SetupVars:
             0, 0,          #  bl,wl
         ])
         self.exp.x0 = np.array([
-            0.8, 0.4,          #  wb 
+            0.7, 0.7,          #  wb 
             1,  0,  0,     #  ccm
             0,  1,  0,     #  ccm 
             0,  0,  1,     #  ccm 
             0.8, 0.1,          #  bl,wl
         ])
+        self.exp.x0 = np.array([
+            0.7, 0.7,     #  wb 
+            1.31,-0.09,-0.22,-0.45,1.72,-0.26,0.11,-0.85,1.76, # ccm
+            0.0, 2.0,       #  bl,wl
+        ])
         self.exp.bounds = [(-2,2)] * self.exp.x0.size
-        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.0, 'deltaE_average': 1.0, 'deltaC_average': 0.0, 'noise_average': 0.0, } 
+        self.exp.cur_res.cost_multiplier = {'greyFC_average': 0.0, 'deltaE_average': 1.0, 'deltaC_average': 0.0, 'noise_average': 0.1, } 
         print(f"reset multipliers to : {self.exp.cur_res.cost_multiplier}")
 
     def eq_spline(self):
@@ -796,15 +807,24 @@ class SetupCallback:
         # assume 16bit images
         # TODO: make it work for 8-bit inputs
         # for eg2 Black=1024 White=15600
-        bl = clamp(bl,0,2)
-        wl = clamp(wl,0,2)
+        #bl = clamp(bl,0,2)
+        #wl = clamp(wl,0,2)
         sixteenbit = 2**16 - 1
 
-        # bl=2 makes black=10% (instead of 0) while wl=2 makes white=20% (instead of 100%)
-        self.exp.cur_res.blacklevelp = 5 * bl 
-        self.exp.cur_res.whitelevelp = 100 - (40 * wl)
-        self.exp.blacklevel  = int(sixteenbit * self.exp.cur_res.blacklevelp / 100.0)
-        self.exp.whitelevel  = int(sixteenbit * self.exp.cur_res.whitelevelp / 100.0)
+        #       bl=2 makes black=5*2=10% (instead of 0) 
+        # while wl=2 makes white=100-90=10% (instead of 100%)
+        #self.exp.cur_res.blacklevelp = 5 * abs(bl)
+        #self.exp.cur_res.whitelevelp = 100 - (45 * abs(wl))
+        self.exp.cur_res.blacklevelp = abs(bl)
+        #self.exp.cur_res.whitelevelp = 12.5 + wl
+        #self.exp.cur_res.whitelevelp = 3.125 + 4 * wl
+        self.exp.blacklevel  = round(sixteenbit * self.exp.cur_res.blacklevelp / 100.0)
+        #self.exp.whitelevel  = int(sixteenbit * self.exp.cur_res.whitelevelp / 100.0)
+
+        self.exp.whitelevel  = 25000 + 10000 * wl
+        self.exp.cur_res.whitelevelp = 100 * self.exp.whitelevel / sixteenbit
+
+
 
 # end class SetupCallback
 
